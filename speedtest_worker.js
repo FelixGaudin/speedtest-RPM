@@ -22,9 +22,9 @@ var pingStatus = ""; // ping in milliseconds with 2 decimal digits
 var jitterStatus = ""; // jitter in milliseconds with 2 decimal digits
 var clientIp = ""; // client's IP address as reported by getIP.php
 var rpmUlStatus = ""; // number of RPM in upload way
-var rpmUlRatioStatus = ""; // number of RPM lost in upload way
+var rpmUlDeltaStatus = ""; // number of RPM lost in upload way
 var rpmDlStatus = ""; // number of RPM in download way
-var rpmDlRatioStatus = ""; // number of RPM lost in download way
+var rpmDlDeltaStatus = ""; // number of RPM lost in download way
 var dlProgress = 0; //progress of download test 0-1
 var ulProgress = 0; //progress of upload test 0-1
 var pingProgress = 0; //progress of ping+jitter test 0-1
@@ -60,10 +60,10 @@ var settings = {
 	time_ulGraceTime: 3, //time to wait in seconds before actually measuring ul speed (wait for buffers to fill)
 	time_dlGraceTime: 1.5, //time to wait in seconds before actually measuring dl speed (wait for TCP window to increase)
 	count_ping: 10, // number of pings to perform in ping test
-	url_dl: "backend/garbage.php", // path to a large file or garbage.php, used for download test. must be relative to this js file
-	url_ul: "backend/empty.php", // path to an empty file, used for upload test. must be relative to this js file
-	url_ping: "backend/empty.php", // path to an empty file, used for ping test. must be relative to this js file
-	url_getIp: "backend/getIP.php", // path to getIP.php relative to this js file, or a similar thing that outputs the client's ip
+	url_dl: "https://speedtest.rysingan.dev/backend/garbage.php", // path to a large file or garbage.php, used for download test. must be relative to this js file
+	url_ul: "https://speedtest.rysingan.dev/backend/empty.php", // path to an empty file, used for upload test. must be relative to this js file
+	url_ping: "https://speedtest.rysingan.dev/backend/empty.php", // path to an empty file, used for ping test. must be relative to this js file
+	url_getIp: "https://speedtest.rysingan.dev/backend/getIP.php", // path to getIP.php relative to this js file, or a similar thing that outputs the client's ip
 	getIp_ispInfo: true, //if set to true, the server will include ISP info with the IP address
 	getIp_ispInfo_distance: "km", //km or mi=estimate distance from server in km/mi; set to false to disable distance estimation. getIp_ispInfo must be enabled in order for this to work
 	xhr_dlMultistream: 6, // number of download streams to use (can be different if enable_quirks is active)
@@ -75,7 +75,7 @@ var settings = {
 	garbagePhp_chunkSize: 100, // size of chunks sent by garbage.php (can be different if enable_quirks is active)
 	enable_quirks: true, // enable quirks for specific browsers. currently it overrides settings to optimize for specific browsers, unless they are already being overridden with the start command
 	ping_allowPerformanceApi: true, // if enabled, the ping test will attempt to calculate the ping more precisely using the Performance API. Currently works perfectly in Chrome, badly in Edge, and not at all in Firefox. If Performance API is not supported or the result is obviously wrong, a fallback is provided.
-	overheadCompensationFactor: 1.06, //can be changed to compensatie for transport overhead. (see doc.md for some other values)
+	overheadCompensationFactor: 1, //can be changed to compensatie for transport overhead. (see doc.md for some other values)
 	useMebibits: false, //if set to true, speed will be reported in mebibits/s instead of megabits/s
 	telemetry_level: 0, // 0=disabled, 1=basic (results only), 2=full (results and timing) 3=debug (results+log)
 	url_telemetry: "results/telemetry.php", // path to the script that adds telemetry data to the database
@@ -87,11 +87,11 @@ var settings = {
 		TMP: 0.95, // Trimmed Mean Percentage to be trimmed
 		SDT: 0.05, // Standard Deviation Tolerance for stability detection
 		MNP: 16, // Maximum number of parallel transport-layer connections
-		MPS: 20, // Maximum responsiveness probes per second
+		MPS: 10, // Maximum responsiveness probes per second
 		PTC: 0.05, // Percentage of Total Capacity the probes are allowed to consume
 		MaxTime: 20, // Maximum Time in second 
 	},
-	useWildcard : false // Use wildcard link for connexions
+	useWildcard : true // Use wildcard link for connexions
 };
 
 var xhr = null; // array of currently active xhr requests
@@ -104,6 +104,10 @@ var test_pointer = 0; //pointer to the next test to run inside settings.test_ord
 function url_sep(url) {
 	return url.match(/\?/) ? "&" : "?";
 }
+
+const ID_SERVER = "https://logs.rysingan.dev"
+var lockTestId = null;
+var resultOutput = "";
 
 function useWildcard(url, subdomain) {
 	let domain = ""
@@ -120,7 +124,6 @@ function useWildcard(url, subdomain) {
 	let newDomain = parts.join('.');
 	return url.replace(domain, newDomain)
 }
-
 /*
 	listener for commands from main thread to this worker.
 	commands:
@@ -147,10 +150,12 @@ this.addEventListener("message", function(e) {
 				testId: testId,
 				rpmDlProgress: rpmDlProgress,
 				rpmDlStatus: rpmDlStatus,
-				rpmDlRatioStatus: rpmDlRatioStatus,
+				rpmDlDeltaStatus: rpmDlDeltaStatus,
 				rpmUlProgress: rpmUlProgress,
 				rpmUlStatus: rpmUlStatus,
-				rpmUlRatioStatus: rpmUlRatioStatus,
+				token: lockTestId,
+				resultOutput: resultOutput,
+				rpmUlDeltaStatus: rpmUlDeltaStatus,
 			})
 		);
 	}
@@ -230,88 +235,150 @@ this.addEventListener("message", function(e) {
 			if (testState == ABORT_STATE) return;
 			if (test_pointer >= settings.test_order.length) {
 				//test is finished
-				if (settings.telemetry_level > 0)
-					sendTelemetry(function(id) {
-						testState = FINISHED_STATE;
-						if (id != null) testId = id;
-					});
-				else {testState = FINISHED_STATE;}
-				return;
+				xhr = new XMLHttpRequest();
+				xhr.onload = function () {
+					if (xhr.readyState == 4) {
+						if (xhr.status == 200) {
+							console.log(xhr.responseText);
+							resultOutput = xhr.responseText;
+							if (settings.telemetry_level > 0)
+								sendTelemetry(function(id) {
+									testState = FINISHED_STATE;
+									if (id != null) testId = id;
+								});
+							else {testState = FINISHED_STATE;}
+						}
+					}
+				};
+				xhr.onerror = function () {
+					console.log("ERROR");
+					console.log(JSON.stringify(xhr))
+				};
+				xhr.open("POST", `${ID_SERVER}/release-lock/${lockTestId}`, false)
+				xhr.send(JSON.stringify({
+					testState: testState,
+					dlStatus: dlStatus,
+					ulStatus: ulStatus,
+					pingStatus: pingStatus,
+					clientIp: clientIp,
+					jitterStatus: jitterStatus,
+					dlProgress: dlProgress,
+					ulProgress: ulProgress,
+					pingProgress: pingProgress,
+					testId: testId,
+					rpmDlProgress: rpmDlProgress,
+					rpmDlStatus: rpmDlStatus,
+					rpmUlProgress: rpmUlProgress,
+					rpmUlStatus: rpmUlStatus,
+					token: lockTestId,
+				}))
 			}
-			switch (settings.test_order.charAt(test_pointer)) {
-				case "I":
-					{
+			if (lockTestId === null) {
+				// ICI
+				try {
+					console.log(`${ID_SERVER}/get-id?type=rpm`);
+					xhr = new XMLHttpRequest();
+					xhr.onload = function () {
+						console.log(xhr);
+						console.log(this);
+						if (xhr.readyState == 4) {
+							if (xhr.status == 200) {
+								lockTestId = JSON.parse(xhr.responseText).id
+								console.log(`Test id : ${lockTestId}`);
+								runNextTest()
+							} else if (xhr.status == 401) {
+								console.log("Another test is running");
+								postMessage(JSON.stringify({
+									error: "Another test is running, please try in a minute"
+								}))
+								testState = ABORT_STATE
+							}
+						}
+					};
+					xhr.onerror = function () {
+						console.log("ERROR HE HO");
+						console.log(xhr);
+						console.log(JSON.stringify(xhr))
+						console.log(JSON.stringify(this))
+					};
+					xhr.open("GET", `${ID_SERVER}/get-id?type=rpm`, false)
+					console.log(xhr);
+					xhr.send()
+				} catch (err) {
+					console.log(err);
+				}
+			} else {
+
+				switch (settings.test_order.charAt(test_pointer)) {
+					case "I":
+						{
+							test_pointer++;
+							if (iRun) {
+								runNextTest();
+								return;
+							} else iRun = true;
+							getIp(runNextTest);
+						}
+						break;
+					case "D":
+						{
+							test_pointer++;
+							if (dRun) {
+								runNextTest();
+								return;
+							} else dRun = true;
+							dlTest(runNextTest);
+						}
+						break;
+					case "U":
+						{
+							test_pointer++;
+							if (uRun) {
+								runNextTest();
+								return;
+							} else uRun = true;
+							ulTest(runNextTest);
+						}
+						break;
+					case "P":
+						{
+							test_pointer++;
+							if (pRun) {
+								runNextTest();
+								return;
+							} else pRun = true;
+							pingTest(runNextTest);
+						}
+						break;
+					case "R":
+						{
+							test_pointer++;
+							if (rRun) {
+								runNextTest();
+								return;
+							} else rRun = true;
+							rpmUlTest(runNextTest);
+						}
+						break;
+					case "S":
+						{
+							test_pointer++;
+							if (sRun) {
+								runNextTest();
+								return;
+							} else sRun = true;
+							rpmDlTest(runNextTest)
+						}
+						break;
+					case "_":
+						{
+							test_pointer++;
+							setTimeout(runNextTest, 1000);
+						}
+						break;
+					default:
 						test_pointer++;
-						if (iRun) {
-							runNextTest();
-							return;
-						} else iRun = true;
-						getIp(runNextTest);
-					}
-					break;
-				case "D":
-					{
-						test_pointer++;
-						if (dRun) {
-							runNextTest();
-							return;
-						} else dRun = true;
-						testState = DOWNLOAD_TEST_STATE;
-						dlTest(runNextTest);
-					}
-					break;
-				case "U":
-					{
-						test_pointer++;
-						if (uRun) {
-							runNextTest();
-							return;
-						} else uRun = true;
-						testState = UPLOAD_TEST_STATE;
-						ulTest(runNextTest);
-					}
-					break;
-				case "P":
-					{
-						test_pointer++;
-						if (pRun) {
-							runNextTest();
-							return;
-						} else pRun = true;
-						testState = PING_JITTER_TEST_STATE;
-						pingTest(runNextTest);
-					}
-					break;
-				case "R":
-					{
-						test_pointer++;
-						if (rRun) {
-							runNextTest();
-							return;
-						} else rRun = true;
-						testState = RPM_UPLOAD_TEST_STATE;
-						rpmUlTest(runNextTest);
-					}
-					break;
-				case "S":
-					{
-						test_pointer++;
-						if (sRun) {
-							runNextTest();
-							return;
-						} else sRun = true;
-						testState = RPM_DOWNLOAD_TEST_STATE;
-						rpmDlTest(runNextTest)
-					}
-					break;
-				case "_":
-					{
-						test_pointer++;
-						setTimeout(runNextTest, 1000);
-					}
-					break;
-				default:
-					test_pointer++;
+				}
 			}
 		};
 		runNextTest();
@@ -387,7 +454,7 @@ function getIp(done) {
 		tlog("getIp failed, took " + (new Date().getTime() - startT) + "ms");
 		done();
 	};
-	xhr.open("GET", settings.url_getIp + url_sep(settings.url_getIp) + (settings.mpot ? "cors=true&" : "") + (settings.getIp_ispInfo ? "isp=true" + (settings.getIp_ispInfo_distance ? "&distance=" + settings.getIp_ispInfo_distance + "&" : "&") : "&") + "r=" + Math.random(), true);
+	xhr.open("GET", useWildcard(settings.url_getIp, "ip") + url_sep(settings.url_getIp) + (settings.mpot ? "cors=true&" : "") + (settings.getIp_ispInfo ? "isp=true" + (settings.getIp_ispInfo_distance ? "&distance=" + settings.getIp_ispInfo_distance + "&" : "&") : "&") + "r=" + Math.random(), true);
 	xhr.send();
 }
 // download test, calls done function when it's over
@@ -747,7 +814,7 @@ function pingTest(done) {
 			}
 		}.bind(this);
 		// send xhr
-		xhr[0].open("GET", settings.url_ping + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
+		xhr[0].open("GET", useWildcard(settings.url_ping, "ping") + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 		xhr[0].send();
 	}.bind(this);
 	doPing(); // start first ping
@@ -771,8 +838,7 @@ function rpm(way, createLoadGeneratingConnexions, doPing, done, updateTotalLoade
 	function instantaneousAgreegateGoodput(i) {
 		return Math.max((checkpoints[i] - checkpoints[i - 1]) / ((checkpointTimes[i] - checkpointTimes[i - 1]) / 1000), 0);
 	}
-	// Util functions for the loop
-	function hasGoodputSaturate() {
+	function hasGoodputSaturate(i) {
 		let MADinstantGoodputs = instantGoodputs.slice(-settings.rpm.MAD);
 		const n = MADinstantGoodputs.length;
 		const mean = MADinstantGoodputs.reduce((acc, val) => acc + val, 0) / n;
@@ -795,7 +861,6 @@ function rpm(way, createLoadGeneratingConnexions, doPing, done, updateTotalLoade
 	}
 	const startTime = new Date().getTime();
 	let onLoadedConnection = true;
-	// Pings
 	let pingInterval = setInterval(function() {
 		doPing((ping) => {
 				if ((testState !== RPM_DOWNLOAD_TEST_STATE && way === "download") || (testState !== RPM_UPLOAD_TEST_STATE && way === "upload")) {return}
@@ -822,15 +887,20 @@ function rpm(way, createLoadGeneratingConnexions, doPing, done, updateTotalLoade
 		totLoaded = updateTotalLoaded();
 		// elapsedTime in ms
 		let elapsedTime = new Date().getTime() - startTime;
+		// If ended
 		if (i > settings.rpm.MaxTime) {
-			// Timeout ending
-			tlog(`Rpm ${way} timeout end`);
+			console.log("Timeout end");
 			let status = failed ? "failed" : rpm;
 			clearInterval(pingInterval)
 			clearInterval(interval)
 			clearRequests();
 			rpmDlProgress = 1;
 			tlog("rpmTest: " + status + ", took " + (elapsedTime) + "ms");
+			console.log("rpmTest: " + status + ", took " + (elapsedTime) + "ms");
+			console.log(checkpoints);
+			console.log(checkpointTimes);
+			console.log(loadGenerationAdded);
+			console.log(pings);
 			done();
 		} else {
 			// Updates
@@ -838,7 +908,7 @@ function rpm(way, createLoadGeneratingConnexions, doPing, done, updateTotalLoade
 			checkpointTimes[i] = elapsedTime;
 			instantGoodputs[i] = instantaneousAgreegateGoodput(i);
 			movigAvgGoodputs[i] = movingAverageAgreegateGoodput(i);
-			// Compute trimmed mean for responsiveness
+			// Compute trimmed mean (RPM)
 			let sortedValues = pings.sort();
 			let trimCount = Math.floor(sortedValues.length * ((1 - settings.rpm.TMP) / 2));
 			let trimmedValues = sortedValues.slice(trimCount, sortedValues.length - trimCount);
@@ -847,19 +917,19 @@ function rpm(way, createLoadGeneratingConnexions, doPing, done, updateTotalLoade
 				rpm = 60_000 / mean;
 				// Update results
 				let pingAsRPM = parseFloat(pingStatus);
-				let ratioRPM = "";
+				let deltaRPM = "";
 				if (pingAsRPM) {
 					pingAsRPM = Math.round(60_000 / pingAsRPM);
-					ratioRPM = pingAsRPM / rpm;
-					ratioRPM = ratioRPM.toFixed(2);
+					deltaRPM = pingAsRPM/rpm;
+					deltaRPM = deltaRPM.toFixed(2);
 				};
 				if (way === "upload") {
 					rpmUlStatus = rpm.toFixed(0);
-					rpmUlRatioStatus = ratioRPM;
+					rpmUlDeltaStatus = deltaRPM;
 					rpmUlProgress = 1;
 				} else if (way === "download") {
 					rpmDlStatus = rpm.toFixed(0);
-					rpmDlRatioStatus = ratioRPM;
+					rpmDlDeltaStatus = deltaRPM;
 					rpmDlProgress = 1;
 				}
 			}
@@ -882,11 +952,11 @@ function rpm(way, createLoadGeneratingConnexions, doPing, done, updateTotalLoade
 			// Check if goodput has saturated
 			let currentAvg = movigAvgGoodputs[i]
 			let stdDevAvgGoodput = getStdDev(movigAvgGoodputs)
-			if (hasGoodputSaturate() || (stdDevAvgGoodput < settings.rpm.SDT * currentAvg)) {
+			if (hasGoodputSaturate(i) || (stdDevAvgGoodput < settings.rpm.SDT * currentAvg)) {
 				// Goodput has staturated
 				let currentResponsiveness = responsivenesses[i];
 				if (getStdDev(responsivenesses) < settings.rpm.SDT * currentResponsiveness) {
-					tlog(`Rpm ${way} gracefull end`);
+					console.log("Gracefull end");
 					let status = failed ? "failed" : rpm;
 					clearInterval(pingInterval)
 					clearInterval(interval)
@@ -900,11 +970,26 @@ function rpm(way, createLoadGeneratingConnexions, doPing, done, updateTotalLoade
 					}
 					rpmDlProgress = 1;
 					tlog("rpmTest: " + status + ", took " + (elapsedTime) + "ms");
+					console.log("rpmTest: " + status + ", took " + (elapsedTime) + "ms");
+					console.log("Bytes loaded");
+					console.log(checkpoints);
+					console.log("Timestamps");
+					console.log(checkpointTimes);
+					console.log("Load added");
+					console.log(loadGenerationAdded);
+					console.log("Pings values");
+					console.log(pings);
+					console.log("RPM's");
+					console.log(responsivenesses);
 					done();
+					return
 				}
 			}
 		}
-		tlog(`RPM ${way} round ${i}, ${movingAverageAgreegateGoodput(i) * 8}bps, ${rpm} RPM`)
+		console.log(`RPM ${way} round ${i}`)
+		function formatBytes(a, b = 2) { if (!+a) return "0 Bytes"; const c = 0 > b ? 0 : b, d = Math.floor(Math.log(a) / Math.log(1024)); return `${parseFloat((a / Math.pow(1024, d)).toFixed(c))} ${["bits", "Kb", "Mb", "Gb", "Tb", "Pb", "Eb", "Zb", "Yb"][d]}` }
+		console.log(formatBytes(movingAverageAgreegateGoodput(i) * 8) + "ps");
+		console.log(`RPM : ${rpm}`);
 		i++;
 	}.bind(this), settings.rpm.ID*1000)
 }
@@ -1000,6 +1085,8 @@ function rpmUlTest(done) {
 				if (settings.useWildcard) {
 					// WILDCARD
 					xhr[i].open("POST", useWildcard(settings.url_ul, `con${i}`) + url_sep(settings.url_ul) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
+					// xhr[i].setRequestHeader("Sec-Fetch-Mode", "cors");
+					// xhr[i].setRequestHeader("Sec-Fetch-Site", "cross-site");
 				} else {
 					xhr[i].open("POST", settings.url_ul + url_sep(settings.url_ul) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 				}
@@ -1050,8 +1137,10 @@ function rpmUlTest(done) {
 				if (onLoadedConnection) {
 					xhr[idx].open("POST", useWildcard(settings.url_ping, "con2") + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 				} else {
-					xhr[idx].open("POST", useWildcard(settings.url_ping, `ping${Math.floor(Math.random() * 1000)}`) + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
+					xhr[idx].open("POST", useWildcard(settings.url_ping, "ping") + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 				}
+				// xhr[idx].setRequestHeader("Sec-Fetch-Mode", "cors");
+				// xhr[idx].setRequestHeader("Sec-Fetch-Site", "cross-site");
 			} else {
 				xhr[idx].open("POST", settings.url_ping + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 			}
@@ -1128,6 +1217,8 @@ function rpmDlTest(done) {
 			if (settings.useWildcard) {
 				// Wildcard
 				xhr[i].open("GET", useWildcard(settings.url_dl, `con${i}`) + url_sep(settings.url_dl) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random() + "&ckSize=" + settings.garbagePhp_chunkSize, true); // random string to prevent caching
+				// xhr[i].setRequestHeader("Sec-Fetch-Mode", "cors");
+				// xhr[i].setRequestHeader("Sec-Fetch-Site", "cross-site");
 			} else {
 				xhr[i].open("GET", settings.url_dl + url_sep(settings.url_dl) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random() + "&ckSize=" + settings.garbagePhp_chunkSize, true); // random string to prevent caching
 			}
@@ -1171,8 +1262,10 @@ function rpmDlTest(done) {
 				if (onLoadedConnection) {
 					xhr[idx].open("GET", useWildcard(settings.url_ping , "con2") + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 				} else {
-					xhr[idx].open("GET", useWildcard(settings.url_ping, `ping${Math.floor(Math.random() * 1000)}`) + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
+					xhr[idx].open("GET", useWildcard(settings.url_ping, "ping") + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 				}
+				// xhr[idx].setRequestHeader("Sec-Fetch-Mode", "cors");
+				// xhr[idx].setRequestHeader("Sec-Fetch-Site", "cross-site");
 			} else {
 				xhr[idx].open("GET", settings.url_ping + url_sep(settings.url_ping) + (settings.mpot ? "cors=true&" : "") + "r=" + Math.random(), true); // random string to prevent caching
 			}

@@ -109,10 +109,12 @@ function updateUI(forced){
 	drawMeter(I("ulMeter"),mbpsToAmount(Number(uiData.ulStatus*(status==3?oscillate():1))),meterBk,ulColor,Number(uiData.ulProgress),progColor);
 	I("pingText").textContent=format(uiData.pingStatus);
 	I("jitText").textContent=format(uiData.jitterStatus);
+	I("testToken").textContent=uiData.token;
+	I("resultOutput").textContent=uiData.resultOutput;
 	I("rpmUlText").textContent=(status==4&&uiData.rpmUlStatus==0)?"...":uiData.rpmUlStatus;
-	I("rpmUlRatioText").textContent=(status==4&&uiData.rpmUlStatus==0)?"...":uiData.rpmUlRatioStatus;
+	I("rpmUlDeltaText").textContent=(status==4&&uiData.rpmUlStatus==0)?"...":uiData.rpmUlDeltaStatus;
 	I("rpmDlText").textContent=(status==5&&uiData.rpmDlStatus==0)?"...":uiData.rpmDlStatus;
-	I("rpmDlRatioText").textContent=(status==5&&uiData.rpmDlStatus==0)?"...":uiData.rpmDlRatioStatus;
+	I("rpmDlDeltaText").textContent=(status==5&&uiData.rpmDlStatus==0)?"...":uiData.rpmDlDeltaStatus;
 }
 function oscillate(){
 	return 1+0.02*Math.sin(Date.now()/100);
@@ -134,9 +136,11 @@ function initUI(){
 	I("jitText").textContent="";
 	I("ip").textContent="";
 	I("rpmUlText").textContent="";
-	I("rpmUlRatioText").textContent="";
+	I("rpmUlDeltaText").textContent="";
 	I("rpmDlText").textContent="";
-	I("rpmDlRatioText").textContent="";
+	I("testToken").textContent="";
+	I("resultOutput").textContent="";
+	I("rpmDlDeltaText").textContent="";
 }
 </script>
 <style type="text/css">
@@ -312,9 +316,11 @@ function initUI(){
 <h1><?= getenv('TITLE') ?: 'LibreSpeed Example' ?></h1>
 <div id="testWrapper">
 	<div id="startStopBtn" onclick="startStop()"></div><br/>
-	<?php if(getenv("TELEMETRY")=="true"){ ?>
         <a class="privacy" href="#" onclick="I('privacyPolicy').style.display=''">Privacy</a>
-	<?php } ?>
+	<div>
+		Your test id is : <span id="testToken"></span>
+	</div>
+	<div id="resultOutput"></div>
 	<div id="test">
 		<div class="testGroup">
 			<div class="testArea2">
@@ -352,8 +358,8 @@ function initUI(){
 						<div>RPM</div>
 					</div>
 					<div class="respResult">
-						<div> Factor of latency increase :</div>
-						<div id="rpmDlRatioText">-</div>
+						<div>Factor of latency increase :</div>
+						<div id="rpmDlDeltaText">-</div>
 					</div>
 				</div>
 				<div class="respResultArea">
@@ -363,8 +369,8 @@ function initUI(){
 						<div>RPM</div>
 					</div>
 					<div class="respResult">
-						<div> Factor of latency increase :</div>
-						<div id="rpmUlRatioText">-</div>
+						<div>Factor of latency increase :</div>
+						<div id="rpmUlDeltaText">-</div>
 					</div>
 				</div>
 			</div>
@@ -379,10 +385,17 @@ function initUI(){
 			<img src="" id="resultsImg" />
 		</div>
 	</div>
-	<div style="margin-bottom: 2em">
+	<div style="margin-bottom: 1em">
+		Note : The test measure the <a href="https://en.wikipedia.org/wiki/Goodput">goodput</a> of the connection, not the total bandwidth. The number may be a bit less than other speedtest website.
+	</div>
+	<div style="margin-bottom: 0.5em">
 		The RPM is the number of Round-trip time (RTT) Per Minute. This metric describes the latency under working conditions. <a href="https://datatracker.ietf.org/doc/draft-ietf-ippm-responsiveness/">Click here to know more about it.</a>
 	</div>
-	<a href="https://github.com/librespeed/speedtest">Source code</a>
+	<div>
+		This website has been developed as part of my master's thesis project. It includes a feature that allows it to use <a href="https://en.wikipedia.org/wiki/HTTP/3">HTTP/3 protocol</a>.
+	</div>
+	<a href="https://github.com/librespeed/speedtest">Source code of the original project</a>
+	<a href="https://github.com/FelixGaudin/speedtest-RPM">Source code of this fork</a>
 </div>
 <div id="privacyPolicy" style="display:none">
     <h2>Privacy Policy</h2>
@@ -399,14 +412,17 @@ function initUI(){
             <li>Approximate location (inferred from IP address, not GPS)</li>
             <li>User agent and browser locale</li>
             <li>Test log (contains no personal information)</li>
+			<li>HTTP/3 logs on server side (for more information see <a href="https://datatracker.ietf.org/doc/draft-marx-qlog-main-schema/">this</a> )</li>
         </ul>
     </p>
     <h4>How we use the data</h4>
     <p>
-        Data collected through this service is used to:
+        Data collected through this service is used for:
         <ul>
-            <li>Allow sharing of test results (sharable image for forums, etc.)</li>
-            <li>To improve the service offered to you (for instance, to detect problems on our side)</li>
+            <!-- <li>Allow sharing of test results (sharable image for forums, etc.)</li> -->
+            <!-- <li>To improve the service offered to you (for instance, to detect problems on our side)</li> -->
+			<li>My master thesis :)</li>
+			<li>Scientific usage</li>
         </ul>
         No personal information is disclosed to third parties.
     </p>
@@ -417,10 +433,10 @@ function initUI(){
     <h4>Data removal</h4>
     <p>
         If you want to have your information deleted, you need to provide either the ID of the test or your IP address. This is the only way to identify your data, without this information we won't be able to comply with your request.<br/><br/>
-        Contact this email address for all deletion requests: <a href="mailto:<?=getenv("EMAIL") ?>"><?=getenv("EMAIL") ?></a>.
+        Contact this email address for all deletion requests: <a href="mailto:felix.gaudin@student.uclouvain.be">felix.gaudin@student.uclouvain.be</a>
     </p>
     <br/><br/>
-    <a class="privacy" href="#" onclick="I('privacyPolicy').style.display='none'">Close</a><br/>
+    <a class="privacy" href="#" onclick="I('privacyPolicy').style.display='none'">close</a><br/>
 </div>
 <script type="text/javascript">setTimeout(function(){initUI()},100);</script>
 </body>
